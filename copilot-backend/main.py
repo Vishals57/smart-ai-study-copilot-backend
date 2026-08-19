@@ -1,93 +1,73 @@
 import os
 import json
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from google import genai
-from dotenv import load_dotenv
+import google.generativeai as genai
 from database import get_db_connection
 
-# Load environment variables from your .env file
-load_dotenv()
+# Configure Gemini API
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-app = FastAPI(title="Smart AI Study Co-Pilot")
+app = FastAPI()
 
-# Retrieve the API key string stored in the .env file
-api_key = os.getenv("GEMINI_API_KEY")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-if not api_key:
-    raise ValueError("GEMINI_API_KEY is missing from environment variables or .env file.")
-
-# Initialize Gemini Client with the key
-client = genai.Client(api_key=api_key)
-
-class StudyPlanRequest(BaseModel):
+class RoadmapRequest(BaseModel):
     user_id: int
-    goal: str
+    topic: str
     days: int
+    hours_per_day: int
 
 @app.post("/generate-roadmap")
-async def generate_roadmap(req: StudyPlanRequest):
-    prompt = f"""
-    Break down the following learning goal into a day-by-day task plan.
-    Goal: {req.goal}
-    Duration: {req.days} days.
-
-    Return ONLY a valid JSON array of objects with keys "day" (integer) and "task" (string).
-    Do not include any conversational text or markdown formatting outside the JSON array.
-    """
-    
+def generate_roadmap(request: RoadmapRequest):
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        clean_json = response.text.replace("```json", "").replace("```", "").strip()
-        tasks_data = json.loads(clean_json)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI Processing Failed: {str(e)}")
+        # 1. Call Gemini AI to produce structured JSON
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        prompt = f"""
+        Create a detailed study roadmap to learn '{request.topic}' over {request.days} days, spending {request.hours_per_day} hours/day.
+        Return strictly a raw JSON object with NO markdown or code fences:
+        {{
+            "topic": "{request.topic}",
+            "tasks": [
+                {{"title": "Specific step or module title", "duration_minutes": 60}}
+            ]
+        }}
+        """
+        response = model.generate_content(prompt)
+        
+        # Clean response
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        plan_data = json.loads(clean_text)
 
-    # Database Insertion Logic
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
+        # 2. Persist in MySQL Database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
         cursor.execute(
-            "INSERT INTO study_plans (user_id, goal_title, duration_days) VALUES (%s, %s, %s)",
-            (req.user_id, req.goal, req.days)
+            "INSERT INTO study_plans (user_id, topic, total_days, hours_per_day) VALUES (%s, %s, %s, %s)",
+            (request.user_id, request.topic, request.days, request.hours_per_day)
         )
         plan_id = cursor.lastrowid
 
-        for item in tasks_data:
+        for task in plan_data.get("tasks", []):
             cursor.execute(
-                "INSERT INTO tasks (plan_id, day_number, task_description) VALUES (%s, %s, %s)",
-                (plan_id, item["day"], item["task"])
+                "INSERT INTO tasks (plan_id, title, duration_minutes, is_completed) VALUES (%s, %s, %s, %s)",
+                (plan_id, task["title"], task["duration_minutes"], False)
             )
         
         conn.commit()
-        return {"status": "success", "plan_id": plan_id, "tasks": tasks_data}
-    
+        cursor.close()
+        conn.close()
+
+        plan_data["plan_id"] = plan_id
+        return plan_data
+
     except Exception as e:
-        import traceback
-        print("Detailed Error Traceback:")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error details: {str(e)}")
-    finally:
-        cursor.close()
-        conn.close()
-
-@app.get("/get-plan/{plan_id}")
-async def get_plan(plan_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute("SELECT * FROM study_plans WHERE plan_id = %s", (plan_id,))
-        plan = cursor.fetchone()
-        if not plan:
-            raise HTTPException(status_code=404, detail="Plan not found")
-
-        cursor.execute("SELECT * FROM tasks WHERE plan_id = %s ORDER BY day_number ASC", (plan_id,))
-        tasks = cursor.fetchall()
-        
-        return {"plan": plan, "tasks": tasks}
-    finally:
-        cursor.close()
-        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
