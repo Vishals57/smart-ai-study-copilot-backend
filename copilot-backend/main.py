@@ -7,7 +7,7 @@ import google.generativeai as genai
 from database import get_db_connection
 
 # Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genai.configure(api_key=os.getenv("AQ.Ab8RN6KTeM9i3lvN-VzmL0JH3hxsSWUztb_phAHgmYxhDVzxAQ"))
 
 app = FastAPI()
 
@@ -50,16 +50,17 @@ def generate_roadmap(request: RoadmapRequest):
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # Updated to match actual schema: goal_title and duration_days
         cursor.execute(
-            "INSERT INTO study_plans (user_id, topic, total_days, hours_per_day) VALUES (%s, %s, %s, %s)",
-            (request.user_id, request.topic, request.days, request.hours_per_day)
+            "INSERT INTO study_plans (user_id, topic, goal_title, duration_days) VALUES (%s, %s, %s, %s)",
+            (request.user_id, request.topic, request.topic, request.days)
         )
         plan_id = cursor.lastrowid
 
-        for task in plan_data.get("tasks", []):
+        for idx, task in enumerate(plan_data.get("tasks", []), start=1):
             cursor.execute(
-                "INSERT INTO tasks (plan_id, title, duration_minutes, is_completed) VALUES (%s, %s, %s, %s)",
-                (plan_id, task["title"], task["duration_minutes"], False)
+                "INSERT INTO tasks (plan_id, day_number, task_description, is_completed) VALUES (%s, %s, %s, %s)",
+                (plan_id, idx, task["title"], False)
             )
         
         conn.commit()
@@ -69,5 +70,24 @@ def generate_roadmap(request: RoadmapRequest):
         plan_data["plan_id"] = plan_id
         return plan_data
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class TaskUpdate(BaseModel):
+    is_completed: bool
+
+@app.put("/tasks/{task_id}")
+def update_task_status(task_id: int, payload: TaskUpdate):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE tasks SET is_completed = %s WHERE task_id = %s",
+            (payload.is_completed, task_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"status": "success", "task_id": task_id, "is_completed": payload.is_completed}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
