@@ -7,7 +7,7 @@ import google.generativeai as genai
 from database import get_db_connection
 
 # Configure Gemini API
-genai.configure(api_key=os.getenv("AQ.Ab8RN6KTeM9i3lvN-VzmL0JH3hxsSWUztb_phAHgmYxhDVzxAQ"))
+genai.configure(api_key=os.getenv("api-key"))
 
 app = FastAPI()
 
